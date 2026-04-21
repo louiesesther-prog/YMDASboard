@@ -5,117 +5,90 @@ import plotly.graph_objects as go
 import numpy as np
 import plotly.express as px
 
-# --- 1. DASHBOARD CONFIG ---
-st.set_page_config(page_title="YM=F Dual Session Tracker", layout="wide")
-st.title("📊 YM=F Volume Spike Pattern Analysis")
-st.markdown("Comparing institutional spikes in **Non-US** vs **US** Sessions.")
+# --- 1. SETTINGS ---
+st.set_page_config(page_title="5-Year Quant Lab", layout="wide")
+st.title("🏛️ YM/NQ 5-Year Institutional Spike Analysis")
 
-# --- 2. DATA FETCHING (With Fallback) ---
-@st.cache_data(ttl=600)
-def get_market_data():
-    # Attempt 1: YM Futures (Best for Volume)
-    # Attempt 2: ^DJI (Backup if YM fails)
-    for ticker in ['YM=F', '^DJI']:
+# --- 2. THE META-PARSER ENGINE ---
+@st.cache_data
+def get_unified_data(uploaded_file, ticker_choice):
+    # Live Data Sync
+    try:
+        live_df = yf.download(ticker_choice, period='60d', interval='15m', progress=False)
+        if isinstance(live_df.columns, pd.MultiIndex):
+            live_df.columns = live_df.columns.get_level_values(0)
+        live_df = live_df.reset_index()
+        live_df.columns.values[0] = 'timestamp'
+        live_df.columns = [str(col).lower() for col in live_df.columns]
+        live_df['timestamp'] = pd.to_datetime(live_df['timestamp'], utc=True).dt.tz_convert('America/New_York')
+    except:
+        live_df = pd.DataFrame()
+
+    # Historical Data Sync
+    if uploaded_file is not None:
         try:
-            df_raw = yf.download(tickers=ticker, period='60d', interval='15m', progress=False)
-            if not df_raw.empty and len(df_raw) > 20:
-                # Flatten MultiIndex
-                if isinstance(df_raw.columns, pd.MultiIndex):
-                    df_raw.columns = df_raw.columns.get_level_values(0)
-                
-                df = df_raw.reset_index()
-                # Force timestamp column name
-                df.columns.values[0] = 'timestamp'
-                df.columns = [str(col).lower() for col in df.columns]
-                
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                df['volume'] = pd.to_numeric(df['volume'], errors='coerce').fillna(0)
-                
-                # Identify Sessions (EST/New York Time)
-                df['hour'] = df['timestamp'].dt.hour
-                df['session'] = np.where(df['hour'].between(9, 16), "US Session", "Non-US Session")
-                return df, ticker
-        except Exception:
-            continue
-    return pd.DataFrame(), None
-
-# --- 3. QUANT LOGIC ---
-try:
-    df, active_ticker = get_market_data()
-
-    if df.empty:
-        st.error("🚨 Market data unavailable. This usually means Yahoo Finance is temporarily blocking the connection. Please refresh in a few minutes.")
-        st.info("Technical Tip: If you are seeing this on Streamlit Cloud, it's a common IP block. Trying again usually works.")
-    else:
-        st.sidebar.success(f"Connected to: {active_ticker}")
-        
-        # Sidebar Settings
-        st.sidebar.header("Filter Controls")
-        session_choice = st.sidebar.multiselect(
-            "Select Sessions", 
-            options=["US Session", "Non-US Session"], 
-            default=["US Session", "Non-US Session"]
-        )
-        
-        z_thresh = st.sidebar.slider("Volume Spike Sensitivity (Z-Score)", 1.5, 6.0, 3.5)
-        
-        # Calculate Z-Score
-        df['vol_mean'] = df['volume'].rolling(window=20).mean()
-        df['vol_std'] = df['volume'].rolling(window=20).std()
-        df['z_score'] = (df['volume'] - df['vol_mean']) / df['vol_std']
-        
-        # Identify Spikes
-        df['is_spike'] = (df['z_score'] > z_thresh) & (df['session'].isin(session_choice))
-        spikes_df = df[df['is_spike']].copy()
-
-        # --- 4. THE UI ---
-        col1, col2 = st.columns([3, 1])
-
-        with col1:
-            st.subheader(f"15m Chart ({active_ticker})")
-            fig = go.Figure(data=[go.Candlestick(
-                x=df['timestamp'],
-                open=df['open'], high=df['high'],
-                low=df['low'], close=df['close'],
-                name=active_ticker
-            )])
-
-            fig.add_trace(go.Scatter(
-                x=spikes_df['timestamp'],
-                y=spikes_df['high'] * 1.001,
-                mode='markers',
-                marker=dict(color='#FFD700', size=10, symbol='triangle-down'),
-                name="Volume Spike"
-            ))
-
-            fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=600)
-            st.plotly_chart(fig, width="stretch")
-
-        with col2:
-            st.subheader("🕒 Spike Patterns")
-            if not spikes_df.empty:
-                spikes_df['time'] = spikes_df['timestamp'].dt.strftime('%H:%M')
-                spikes_df['date'] = spikes_df['timestamp'].dt.strftime('%Y-%m-%d')
-                st.dataframe(
-                    spikes_df[['date', 'time', 'session', 'z_score']].sort_values(by='date', ascending=False),
-                    width="stretch", height=550
-                )
-            else:
-                st.info("No spikes found. Try lowering the Z-Score slider.")
-
-        # --- 5. SEASONALITY ---
-        st.divider()
-        if not spikes_df.empty:
-            st.subheader("📈 Pattern Uniformity: When do spikes occur?")
-            pattern_freq = spikes_df.groupby(['time', 'session']).size().reset_index(name='count')
+            # FIX 1: Read as Tab-Separated (sep='\t') because your data isn't comma-separated
+            hist_df = pd.read_csv(uploaded_file, sep='\t') 
+            hist_df.columns = [str(col).lower().strip() for col in hist_df.columns]
             
-            freq_fig = px.bar(
-                pattern_freq, x='time', y='count', color='session',
-                barmode='group',
-                color_discrete_map={"US Session": "#00CC96", "Non-US Session": "#EF553B"}
-            )
-            freq_fig.update_layout(template="plotly_dark", xaxis_title="Time of Day", yaxis_title="Number of Spikes")
-            st.plotly_chart(freq_fig, width="stretch")
+            # FIX 2: Identify the DateTime column from your specific header
+            if 'datetime' in hist_df.columns:
+                hist_df.rename(columns={'datetime': 'timestamp'}, inplace=True)
+            elif 'date' in hist_df.columns and 'time' in hist_df.columns:
+                hist_df['timestamp'] = hist_df['date'].astype(str) + ' ' + hist_df['time'].astype(str)
+            else:
+                hist_df.rename(columns={hist_df.columns[0]: 'timestamp'}, inplace=True)
 
-except Exception as e:
-    st.error(f"Logic Error: {e}")
+            # FIX 3: Convert MT5 periods (2025.07.15) to standard date format
+            hist_df['timestamp'] = hist_df['timestamp'].astype(str).str.replace('.', '-', regex=False)
+            hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'], errors='coerce', utc=True).dt.tz_convert('America/New_York')
+            
+            # Clean up and merge
+            hist_df = hist_df.dropna(subset=['timestamp'])
+            
+            # TickVolume vs Volume check (MT5 often uses 'tickvolume' for futures)
+            if 'tickvolume' in hist_df.columns and ('volume' not in hist_df.columns or hist_df['volume'].sum() == 0):
+                hist_df['volume'] = hist_df['tickvolume']
+
+            df = pd.concat([hist_df, live_df]).drop_duplicates(subset=['timestamp'])
+            st.sidebar.success(f"✅ Loaded {len(hist_df):,} historical rows.")
+            return df.sort_values('timestamp')
+        except Exception as e:
+            st.error(f"CSV Error: {e}")
+            return live_df
+    return live_df
+
+# --- 3. UI & LOGIC ---
+ticker = st.sidebar.selectbox("Select Asset", ["YM=F", "NQ=F"])
+csv_upload = st.sidebar.file_uploader("Upload 15m_data.csv", type=["csv", "txt"])
+z_thresh = st.sidebar.slider("Z-Score Sensitivity", 3.0, 15.0, 5.0)
+
+df = get_unified_data(csv_upload, ticker)
+
+if not df.empty:
+    # Quant Calculations
+    df['vol_mean'] = df['volume'].rolling(window=20).mean()
+    df['vol_std'] = df['volume'].rolling(window=20).std()
+    df['z_score'] = (df['volume'] - df['vol_mean']) / df['vol_std']
+    
+    df['hour_min'] = df['timestamp'].dt.strftime('%H:%M')
+    df['session'] = np.where(df['timestamp'].dt.hour.between(9, 16), "US Session", "Non-US Session")
+    
+    spikes = df[df['z_score'] > z_thresh].copy()
+
+    # Visuals
+    st.subheader(f"Analyzing {len(df):,} Bars")
+    fig = go.Figure()
+    fig.add_trace(go.Scattergl(x=df['timestamp'], y=df['close'], name="Price", line=dict(color='#444')))
+    fig.add_trace(go.Scattergl(x=spikes['timestamp'], y=spikes['close'], mode='markers', 
+                               marker=dict(color='gold', size=7), name="Spike"))
+    fig.update_layout(template="plotly_dark", height=500)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Uniformity Chart
+    if not spikes.empty:
+        pattern = spikes.groupby(['hour_min', 'session']).size().reset_index(name='count')
+        freq_fig = px.bar(pattern, x='hour_min', y='count', color='session',
+                          color_discrete_map={"US Session": "#00F2FF", "Non-US Session": "#FF007F"})
+        freq_fig.update_layout(template="plotly_dark", xaxis={'categoryorder':'total descending'})
+        st.plotly_chart(freq_fig, use_container_width=True)
